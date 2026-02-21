@@ -1,10 +1,16 @@
-|Pin # |   Label   | **ESP32 Pin** | Function|
-|  1   |   **D3** |    **IO5** | TFT_CS|
-|  2   |   **D4** |    **IO6** | I2C_SDA (MAX30102)|
-|  3   |   **D5** |    **IO7** | I2C_SCL (MAX30102)|
-|  4   |   **D8** |    **IO8** | TFT_SCLK|
-|  5   |   **D10** |    **IO10** | TFT_MOSI|
-|  6   |   **D7** |    **IO21** | TFT_DC|
-|  7   |   **D0** |    **IO2** | I2S_WS (INMP441)|
-|  8   |   **D1** |    **IO3** | I2S_SCK (INMP441)|
-|  9   |   **D2** |    **IO4** | I2S_SD (INMP441)|
+/**************************************************************
+ * Project: ESP32-C3 Nebula Pulse Visualizer
+ * Hardware: Seeed Studio XIAO ESP32-C3, GC9A01 Round Display, 
+ * INMP441 I2S Microphone
+ * * Pin Mapping:
+ * Pin #  |   Label   |  ESP32 Pin  |       Function       
+ *------------------------------------------------------------
+ * 1    |   **DC** |    **6** |  Display Data/Cmd    
+ * 2    |   **CS** |    **7** |  Display Chip Select 
+ * 3    |   **SCLK** |    **8** |  Display SPI Clock   
+ * 4    |   **SDA** |   **10** |  Display SPI MOSI    
+ * 5    |  **MIC-S** |    **2** |  I2S Clock (SCK)     
+ * 6    |  **MIC-W** |    **3** |  I2S Word Sel (WS)   
+ * 7    |  **MIC-D** |    **4** |  I2S Data Out (SD)   
+ * 8    |  **L/R** |   **GND** |  Channel Select      
+ **************************************************************/
