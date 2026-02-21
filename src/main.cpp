@@ -1,77 +1,85 @@
 #include "Adafruit_GC9A01A.h"
 #include <Wire.h>
-#include "MAX30105.h"
+#include <driver/i2s.h>
 
-// Screen Pins
-#define TFT_CS   5
-#define TFT_DC   21
+#define TFT_CS 5
+#define TFT_DC 21
 #define TFT_MOSI 10
 #define TFT_SCLK 8
-#define TFT_RST  -1
+#define TFT_RST -1
+#define I2S_PORT I2S_NUM_0
 
 Adafruit_GC9A01A tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
-MAX30105 particleSensor;
 
-// Logic Variables
-long movingAverage = 0;
-const int filterWeight = 20; // How "smooth" the average is
-bool heartShowing = false;
-unsigned long heartStartTime = 0;
+// Physics: Tuned for snappiness
+float currentR = 60.0, targetR = 60.0, velocity = 0;
+float stiffness = 0.85; 
+float damping = 0.6; 
+float beatThreshold = 150;
 
-void drawHeart(int x, int y, int size, uint16_t color) {
-  tft.fillCircle(x - size/4, y - size/4, size/4, color);
-  tft.fillCircle(x + size/4, y - size/4, size/4, color);
-  tft.fillTriangle(x - size/2, y - size/6, x + size/2, y - size/6, x, y + size/2, color);
+void setupI2S() {
+    const i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+        .sample_rate = 44100,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 2,
+        .dma_buf_len = 32 // Low latency
+    };
+    const i2s_pin_config_t pin_config = {.bck_io_num = 3, .ws_io_num = 2, .data_out_num = -1, .data_in_num = 4};
+    i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    i2s_set_pin(I2S_PORT, &pin_config);
 }
 
 void setup() {
-  delay(3000);
-  Serial.begin(115200);
-  tft.begin();
-  tft.fillScreen(GC9A01A_BLUE);
-  
-  Wire.begin(6, 7);
-  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) while(1);
-  particleSensor.setup();
+    tft.begin(80000000); // Max SPI Clock
+    tft.setRotation(0);
+    tft.fillScreen(GC9A01A_BLACK);
+    setupI2S();
 }
 
 void loop() {
-  long irValue = particleSensor.getIR();
-
-  if (irValue > 50000) { // Finger is present
-    // 1. Update Moving Average
-    // Formula: Average = (Current + (Average * (N-1))) / N
-    movingAverage = (irValue + (movingAverage * (filterWeight - 1))) / filterWeight;
-
-    // 2. Detection Logic: If current value drops significantly below average
-    // We use a sensitivity threshold (e.g., 200 units drop)
-    if (irValue < (movingAverage - 250) && !heartShowing) {
-      drawHeart(120, 100, 80, GC9A01A_RED);
-      heartShowing = true;
-      heartStartTime = millis();
-      Serial.println("BEAT DETECTED!");
+    int32_t samples[16]; // Tiny sample window for instant triggers
+    size_t bytes_read;
+    i2s_read(I2S_PORT, &samples, sizeof(samples), &bytes_read, portMAX_DELAY);
+    
+    float peak = 0;
+    for (int i = 0; i < 16; i++) {
+        float s = abs(samples[i] >> 16); 
+        if (s > peak) peak = s;
     }
 
-    // 3. Timing Logic: Hide heart after 0.3 seconds
-    if (heartShowing && (millis() - heartStartTime > 300)) {
-      // Erase the heart by drawing a blue circle over it
-      tft.fillCircle(120, 100, 45, GC9A01A_BLUE); 
-      heartShowing = false;
+    // TRIGGER LOGIC
+    if (peak > beatThreshold && peak > 100) {
+        targetR = map(constrain(peak, 100, 2000), 100, 2000, 70, 115);
+        beatThreshold = peak * 0.85;
+    } else {
+        targetR = 60.0;
+        beatThreshold *= 0.94;
+        if (beatThreshold < 150) beatThreshold = 150;
     }
 
-    // Optional: Print to Serial Plotter to see the Average vs Raw
-    Serial.print("Raw:"); Serial.print(irValue);
-    Serial.print(",");
-    Serial.print("Avg:"); Serial.println(movingAverage);
+    // SPRING PHYSICS
+    velocity += (targetR - currentR) * stiffness;
+    velocity *= damping;
+    currentR += velocity;
 
-  } else {
-    // No finger: Reset and show message
-    if (movingAverage != 0) {
-        tft.fillScreen(GC9A01A_BLUE);
-        tft.setCursor(50, 110);
-        tft.setTextColor(GC9A01A_WHITE);
-        tft.print("READY...");
-        movingAverage = 0;
+    static int lastR = 60;
+    int r = (int)currentR;
+
+    if (r != lastR) {
+        // 1. ERASE PREVIOUS (Black)
+        tft.drawCircle(120, 120, lastR, GC9A01A_BLACK);
+        tft.drawCircle(120, 120, lastR + 2, GC9A01A_BLACK);
+        tft.drawCircle(120, 120, lastR + 4, GC9A01A_BLACK);
+
+        // 2. DRAW NEW (Nebula Colors)
+        tft.drawCircle(120, 120, r, tft.color565(0, 255, 255));      // Cyan
+        tft.drawCircle(120, 120, r + 2, tft.color565(180, 50, 255)); // Purple
+        tft.drawCircle(120, 120, r + 4, tft.color565(120, 0, 80));   // Dark Red/Purple
+        
+        lastR = r;
     }
-  }
 }
