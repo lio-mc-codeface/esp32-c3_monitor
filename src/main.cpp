@@ -1,29 +1,33 @@
 #include <Arduino_GFX_Library.h>
 #include <driver/i2s.h>
 #include "LittleFS.h"
+#include <Wire.h>
+#include "MAX30105.h"
 
-// --- Hardware Pins (ESP32-C3) ---
+// --- Pins ---
 #define PIN_TFT_DC   5
 #define PIN_TFT_CS   9
 #define PIN_TFT_SCLK 8
 #define PIN_TFT_MOSI 10
-
-// --- I2S Microphone Pins ---
+#define I2C_SDA      6
+#define I2C_SCL      7
 #define I2S_WS       3
 #define I2S_SD       4
 #define I2S_SCK      2
 #define I2S_PORT     I2S_NUM_0
 
-// --- Display Setup ---
+// --- Objects ---
 Arduino_DataBus *bus = new Arduino_ESP32SPI(PIN_TFT_DC, PIN_TFT_CS, PIN_TFT_SCLK, PIN_TFT_MOSI, -1);
 Arduino_GFX *gfx = new Arduino_GC9A01(bus, -1, 0, true);
+MAX30105 particleSensor;
 
-// Global pointer for the image buffer
-uint16_t *frameBuffer; 
-int lastImageIndex = -1;
-
-// Size of our 230x230 image in bytes (230 * 230 * 2 bytes per pixel)
-const uint32_t imageSize = 105800; 
+// --- Buffers & Settings ---
+uint16_t *frameBuffer;
+uint16_t *heartBuffer;
+const uint32_t imageSize = 105800; // 230x230x2
+int heartSizes[] = {100, 106, 112, 118, 124, 130};
+int lastHeartIndex = -1;
+long lastIR = 0;
 
 void setup_i2s() {
     const i2s_config_t i2s_config = {
@@ -49,77 +53,94 @@ void setup_i2s() {
 
 void setup() {
     Serial.begin(115200);
-    // Wait up to 2 seconds for the Serial Monitor to actually connect
-    long startTimer = millis();
-    while (!Serial && millis() - startTimer < 2000); 
-
-    Serial.println("\n--- Starting System ---");
     
-    // Allocate memory for 230x230 pixels
+    // Allocate Memory
     frameBuffer = (uint16_t *)malloc(imageSize);
-    if (!frameBuffer) {
-        Serial.println("RAM Allocation Failed!");
-        while(1) delay(100); 
+    heartBuffer = (uint16_t *)malloc(130 * 130 * 2);
+
+    if (!frameBuffer || !heartBuffer) {
+        Serial.println("Memory Allocation Failed!");
+        while(1);
     }
 
     if(!LittleFS.begin(true)) {
-        Serial.println("LittleFS Mount Failed!");
-        while(1) delay(100);
-    } 
+        Serial.println("LittleFS Failed!");
+        while(1);
+    }
+
+    // Initialize Sensor
+    Wire.begin(I2C_SDA, I2C_SCL);
+    if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+        Serial.println("MAX30102 not found.");
+    } else {
+        particleSensor.setup();
+        particleSensor.setPulseAmplitudeRed(0x0A);
+    }
     
     gfx->begin();
     gfx->fillScreen(BLACK);
     setup_i2s();
-    Serial.println("Setup Complete");
-
-    uint32_t total = LittleFS.totalBytes();
-    uint32_t used = LittleFS.usedBytes();
-    Serial.println("--- LittleFS Storage Check ---");
-    Serial.print("Total space: "); Serial.print(total / 1024); Serial.println(" KB");
-    Serial.print("Used space:  "); Serial.print(used / 1024);  Serial.println(" KB");
-    Serial.print("Free space:  "); Serial.print((total - used) / 1024); Serial.println(" KB");
-    Serial.println("------------------------------");
+    Serial.println("System Ready");
 }
 
 void loop() {
-    // 1. Read Audio Data
+    // 1. Audio Logic
     int32_t samples[64];
     size_t bytes_read;
     i2s_read(I2S_PORT, &samples, sizeof(samples), &bytes_read, portMAX_DELAY);
     
-    // 2. Calculate Volume (RMS)
     float sum_sq = 0;
-    int count = bytes_read / 4;
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < 64; i++) {
         float s = (float)samples[i];
         sum_sq += s * s;
     }
-    float rms = sqrt(sum_sq / count);
-
-    // --- TUNING SECTION ---
-    int silenceFloor = 1200000; 
-    int maxAudioValue = 60000000; // <--- this is the sensitivity
-
-    // 3. Map to 18 images (0 through 17)
-    int imgIndex = map((int)rms, silenceFloor, maxAudioValue, 0, 17);
+    float rms = sqrt(sum_sq / 64);
+    int imgIndex = map((int)rms, 1200000, 60000000, 0, 17);
     imgIndex = constrain(imgIndex, 0, 17);
 
-    // 4. Update screen only if the image index changes
-    if (imgIndex != lastImageIndex) {
-        char filename[32];
-        sprintf(filename, "/%d.bin", imgIndex); 
-        
-        File file = LittleFS.open(filename, "r");
-        if (file) {
-            // FIX: Use the 'imageSize' constant instead of 'sizeof(frameBuffer)'
-            file.read((uint8_t*)frameBuffer, imageSize);
-            file.close();
+    // 2. Heart Logic
+    long irValue = particleSensor.getIR();
+    int heartIndex = 0;
+    if (irValue > 50000) {
+        long delta = irValue - lastIR;
+        lastIR = irValue;
+        heartIndex = map(delta, 25, 300, 0, 5); // Tweaked for sensitivity
+        heartIndex = constrain(heartIndex, 0, 5);
+    }
+
+    // 3. Draw Background Ring
+    char bName[32];
+    sprintf(bName, "/%d.bin", imgIndex);
+    File bFile = LittleFS.open(bName, "r");
+    if (bFile) {
+        bFile.read((uint8_t*)frameBuffer, imageSize);
+        bFile.close();
+        gfx->draw16bitRGBBitmap(5, 5, frameBuffer, 230, 230);
+    }
+
+    // 4. Draw Heart Layer (Transparent/Masked)
+    // 4. Draw Heart Layer (Transparent/Manual Chroma Key)
+    if (irValue > 50000) {
+        char hName[32];
+        sprintf(hName, "/h%d.bin", heartIndex);
+        File hFile = LittleFS.open(hName, "r");
+        if (hFile) {
+            int hSize = heartSizes[heartIndex];
+            hFile.read((uint8_t*)heartBuffer, hSize * hSize * 2);
+            hFile.close();
             
-            // FIX: Use 230, 230 and center it on the 240x240 screen (x=5, y=5)
-            gfx->draw16bitRGBBitmap(5, 5, frameBuffer, 230, 230);
-        } else {
-            Serial.print("Failed to open: "); Serial.println(filename);
+            int startX = (240 - hSize) / 2;
+            int startY = (240 - hSize) / 2;
+            
+            // Manually draw pixels, skipping pure black (0x0000)
+            for (int y = 0; y < hSize; y++) {
+                for (int x = 0; x < hSize; x++) {
+                    uint16_t color = heartBuffer[y * hSize + x];
+                    if (color != 0x0000) { // Transparency Check
+                        gfx->drawPixel(startX + x, startY + y, color);
+                    }
+                }
+            }
         }
-        lastImageIndex = imgIndex;
     }
 }
