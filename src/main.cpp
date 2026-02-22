@@ -23,10 +23,9 @@ MAX30105 particleSensor;
 
 // --- Buffers & Settings ---
 uint16_t *frameBuffer;
-uint16_t *heartBuffer;
+uint16_t *heartFrames[6]; 
 const uint32_t imageSize = 105800; // 230x230x2
 int heartSizes[] = {100, 106, 112, 118, 124, 130};
-int lastHeartIndex = -1;
 long lastIR = 0;
 
 void setup_i2s() {
@@ -53,26 +52,23 @@ void setup_i2s() {
 
 void setup() {
     Serial.begin(115200);
-    
-    // Allocate Memory
     frameBuffer = (uint16_t *)malloc(imageSize);
-    heartBuffer = (uint16_t *)malloc(130 * 130 * 2);
+    if(!LittleFS.begin(true)) while(1);
 
-    if (!frameBuffer || !heartBuffer) {
-        Serial.println("Memory Allocation Failed!");
-        while(1);
+    // Pre-load hearts to RAM
+    for (int i = 0; i < 6; i++) {
+        char hName[16]; sprintf(hName, "/h%d.bin", i);
+        File f = LittleFS.open(hName, "r");
+        if (f) {
+            size_t s = heartSizes[i] * heartSizes[i] * 2;
+            heartFrames[i] = (uint16_t*)malloc(s);
+            if (heartFrames[i]) f.read((uint8_t*)heartFrames[i], s);
+            f.close();
+        }
     }
 
-    if(!LittleFS.begin(true)) {
-        Serial.println("LittleFS Failed!");
-        while(1);
-    }
-
-    // Initialize Sensor
     Wire.begin(I2C_SDA, I2C_SCL);
-    if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
-        Serial.println("MAX30102 not found.");
-    } else {
+    if (particleSensor.begin(Wire, I2C_SPEED_FAST)) {
         particleSensor.setup();
         particleSensor.setPulseAmplitudeRed(0x0A);
     }
@@ -80,67 +76,69 @@ void setup() {
     gfx->begin();
     gfx->fillScreen(BLACK);
     setup_i2s();
-    Serial.println("System Ready");
 }
 
 void loop() {
-    // 1. Audio Logic
+    // 1. Audio Sensing (1ms timeout)
     int32_t samples[64];
-    size_t bytes_read;
-    i2s_read(I2S_PORT, &samples, sizeof(samples), &bytes_read, portMAX_DELAY);
+    size_t bytes_read = 0;
+    i2s_read(I2S_PORT, &samples, sizeof(samples), &bytes_read, 1); 
     
-    float sum_sq = 0;
-    for (int i = 0; i < 64; i++) {
-        float s = (float)samples[i];
-        sum_sq += s * s;
+    int imgIndex = 0; 
+    if (bytes_read > 0) {
+        float sum_sq = 0;
+        for (int i = 0; i < 64; i++) { float s = (float)samples[i]; sum_sq += s * s; }
+        imgIndex = map((int)sqrt(sum_sq / 64), 1200000, 60000000, 0, 17);
+        imgIndex = constrain(imgIndex, 0, 17);
     }
-    float rms = sqrt(sum_sq / 64);
-    int imgIndex = map((int)rms, 1200000, 60000000, 0, 17);
-    imgIndex = constrain(imgIndex, 0, 17);
 
-    // 2. Heart Logic
+    // 2. Heart Sensing
     long irValue = particleSensor.getIR();
-    int heartIndex = 0;
+    int heartIndex = -1; 
     if (irValue > 50000) {
         long delta = irValue - lastIR;
         lastIR = irValue;
-        heartIndex = map(delta, 25, 300, 0, 5); // Tweaked for sensitivity
-        heartIndex = constrain(heartIndex, 0, 5);
-    }
-
-    // 3. Draw Background Ring
-    char bName[32];
-    sprintf(bName, "/%d.bin", imgIndex);
-    File bFile = LittleFS.open(bName, "r");
-    if (bFile) {
-        bFile.read((uint8_t*)frameBuffer, imageSize);
-        bFile.close();
-        gfx->draw16bitRGBBitmap(5, 5, frameBuffer, 230, 230);
-    }
-
-    // 4. Draw Heart Layer (Transparent/Masked)
-    // 4. Draw Heart Layer (Transparent/Manual Chroma Key)
-    if (irValue > 50000) {
-        char hName[32];
-        sprintf(hName, "/h%d.bin", heartIndex);
-        File hFile = LittleFS.open(hName, "r");
-        if (hFile) {
-            int hSize = heartSizes[heartIndex];
-            hFile.read((uint8_t*)heartBuffer, hSize * hSize * 2);
-            hFile.close();
-            
-            int startX = (240 - hSize) / 2;
-            int startY = (240 - hSize) / 2;
-            
-            // Manually draw pixels, skipping pure black (0x0000)
-            for (int y = 0; y < hSize; y++) {
-                for (int x = 0; x < hSize; x++) {
-                    uint16_t color = heartBuffer[y * hSize + x];
-                    if (color != 0x0000) { // Transparency Check
-                        gfx->drawPixel(startX + x, startY + y, color);
-                    }
-                }
-            }
+        heartIndex = 0; // Default baseline
+        if (delta > 25) {
+            heartIndex = map(delta, 25, 300, 1, 5);
+            heartIndex = constrain(heartIndex, 1, 5);
         }
     }
+
+    // 3. Draw Background
+    static int lastImgIndex = -1;
+    bool bgUpdated = false;
+    if (imgIndex != lastImgIndex) {
+        char bName[16]; sprintf(bName, "/%d.bin", imgIndex);
+        File bFile = LittleFS.open(bName, "r");
+        if (bFile) {
+            bFile.read((uint8_t*)frameBuffer, imageSize);
+            bFile.close();
+            gfx->draw16bitRGBBitmap(5, 5, frameBuffer, 230, 230);
+            lastImgIndex = imgIndex;
+            bgUpdated = true;
+        }
+    }
+
+    // 4. Draw Heart from RAM
+    static int lastHeartIdx = -1;
+    if (heartIndex != -1) {
+        if (heartIndex != lastHeartIdx || bgUpdated) {
+            uint16_t* hBuf = heartFrames[heartIndex];
+            int hSize = heartSizes[heartIndex];
+            int start = (240 - hSize) / 2;
+            for (int y = 0; y < hSize; y++) {
+                for (int x = 0; x < hSize; x++) {
+                    uint16_t color = hBuf[y * hSize + x];
+                    if (color != 0x0000) gfx->drawPixel(start + x, start + y, color);
+                }
+            }
+            lastHeartIdx = heartIndex;
+        }
+    } else if (lastHeartIdx != -1) {
+        lastImgIndex = -1; // Force BG redraw to wipe heart
+        lastHeartIdx = -1;
+    }
+    
+    delay(1);
 }
