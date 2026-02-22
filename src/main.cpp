@@ -73,7 +73,7 @@ void setup() {
 }
 
 void loop() {
-    // --- AUDIO PROCESSING ---
+    // --- 1. AUDIO PROCESSING (Same as before) ---
     int32_t samples[32];
     size_t bytes_read = 0;
     i2s_read(I2S_NUM_0, &samples, sizeof(samples), &bytes_read, portMAX_DELAY);
@@ -86,37 +86,64 @@ void loop() {
         }
     }
 
-    // Physics Engine Update
     if (peak > beatThreshold) {
-        targetR = map(constrain(peak, 200, 4000), 200, 4000, 60, 115);
+        targetR = map(constrain(peak, 200, 4000), 200, 4000, 40, 85);
         beatThreshold = peak * 0.9;
     } else {
-        targetR = 60;
+        targetR = 40;
         beatThreshold *= 0.97;
         if (beatThreshold < 200) beatThreshold = 200;
     }
-
     velocity += (targetR - currentR) * stiffness;
     velocity *= damping;
     currentR += velocity;
 
-    // --- HEARTBEAT DATA (Ready for next step) ---
+    // --- 2. SENSITIVE HEARTBEAT ---
+    static float irAverage = 0;
     long irValue = hbSensor.getIR();
 
-    // --- RENDERING ---
-    static int lastR = 60;
-    int r = (int)currentR;
+    if (irAverage == 0) irAverage = irValue;
+    irAverage = (irAverage * 0.98) + (irValue * 0.02); 
+    float delta = irValue - irAverage;
 
-    if (r != lastR) {
-        gfx->drawCircle(120, 120, lastR, BLACK);
-        gfx->drawCircle(120, 120, lastR + 2, BLACK);
-        
-        uint16_t color1 = gfx->color565(r, 255 - r, 255); 
-        uint16_t color2 = gfx->color565(255, 50, r * 2);  
-        
-        gfx->drawCircle(120, 120, r, color1); 
-        gfx->drawCircle(120, 120, r + 2, color2); 
-        
-        lastR = r;
+    // --- 3. RENDERING WITH CLEANUP ---
+    
+    // MIC RING
+    static int lastMicR = 60;
+    int mR = (int)currentR;
+    if (mR != lastMicR) {
+        gfx->drawCircle(120, 120, lastMicR, BLACK);
+        gfx->drawCircle(120, 120, mR, gfx->color565(mR * 2, 100, 255));
+        lastMicR = mR;
     }
+
+    // HEART RING (Fixed Cleanup Logic)
+    static int lastHbR = 0; // Start at 0 so we know if one exists
+    
+    // If we have a strong pulse surge
+    if (delta > 75) { 
+        int hbR = map(constrain(delta, 150, 1500), 150, 1500, 95, 118);
+        
+        // If the size changed, erase the old one and draw the new one
+        if (hbR != lastHbR) {
+            if (lastHbR > 0) {
+                gfx->drawCircle(120, 120, lastHbR, BLACK);
+                gfx->drawCircle(120, 120, lastHbR + 1, BLACK);
+            }
+            uint16_t hbColor = gfx->color565(255, 0, 50);
+            gfx->drawCircle(120, 120, hbR, hbColor);
+            gfx->drawCircle(120, 120, hbR + 1, hbColor);
+            lastHbR = hbR;
+        }
+    } 
+    // If the surge is gone, but a ring is still showing
+    else if (lastHbR > 0) {
+        gfx->drawCircle(120, 120, lastHbR, BLACK);
+        gfx->drawCircle(120, 120, lastHbR + 1, BLACK);
+        lastHbR = 0; // Reset so we don't keep erasing BLACK
+    }
+
+    // Serial Debug
+    Serial.printf("Mic:%d,Delta:%f\n", (int)peak, delta);
+    delay(10); 
 }
