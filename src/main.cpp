@@ -73,7 +73,7 @@ void loop() {
     // Increase 'maxAudioValue' to make it LESS sensitive (requires louder sound).
     // Decrease it to make it MORE sensitive (reaches image 17 easier).
     int silenceFloor = 1200000; 
-    int maxAudioValue = 6000000; // <--- this is the sensitivity
+    int maxAudioValue = 60000000; // <--- this is the sensitivity
 
     // 3. Map to 18 images (0 through 17)
     int imgIndex = map((int)rms, silenceFloor, maxAudioValue, 0, 17);
