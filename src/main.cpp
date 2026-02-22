@@ -18,8 +18,12 @@
 Arduino_DataBus *bus = new Arduino_ESP32SPI(PIN_TFT_DC, PIN_TFT_CS, PIN_TFT_SCLK, PIN_TFT_MOSI, -1);
 Arduino_GFX *gfx = new Arduino_GC9A01(bus, -1, 0, true);
 
-uint16_t frameBuffer[125 * 125]; 
+// Global pointer for the image buffer
+uint16_t *frameBuffer; 
 int lastImageIndex = -1;
+
+// Size of our 230x230 image in bytes (230 * 230 * 2 bytes per pixel)
+const uint32_t imageSize = 105800; 
 
 void setup_i2s() {
     const i2s_config_t i2s_config = {
@@ -45,12 +49,36 @@ void setup_i2s() {
 
 void setup() {
     Serial.begin(115200);
-    if(!LittleFS.begin()) return;
+    // Wait up to 2 seconds for the Serial Monitor to actually connect
+    long startTimer = millis();
+    while (!Serial && millis() - startTimer < 2000); 
 
+    Serial.println("\n--- Starting System ---");
+    
+    // Allocate memory for 230x230 pixels
+    frameBuffer = (uint16_t *)malloc(imageSize);
+    if (!frameBuffer) {
+        Serial.println("RAM Allocation Failed!");
+        while(1) delay(100); 
+    }
+
+    if(!LittleFS.begin(true)) {
+        Serial.println("LittleFS Mount Failed!");
+        while(1) delay(100);
+    } 
+    
     gfx->begin();
-
     gfx->fillScreen(BLACK);
     setup_i2s();
+    Serial.println("Setup Complete");
+
+    uint32_t total = LittleFS.totalBytes();
+    uint32_t used = LittleFS.usedBytes();
+    Serial.println("--- LittleFS Storage Check ---");
+    Serial.print("Total space: "); Serial.print(total / 1024); Serial.println(" KB");
+    Serial.print("Used space:  "); Serial.print(used / 1024);  Serial.println(" KB");
+    Serial.print("Free space:  "); Serial.print((total - used) / 1024); Serial.println(" KB");
+    Serial.println("------------------------------");
 }
 
 void loop() {
@@ -69,9 +97,6 @@ void loop() {
     float rms = sqrt(sum_sq / count);
 
     // --- TUNING SECTION ---
-    // Based on your data, silence is ~1,000,000. 
-    // Increase 'maxAudioValue' to make it LESS sensitive (requires louder sound).
-    // Decrease it to make it MORE sensitive (reaches image 17 easier).
     int silenceFloor = 1200000; 
     int maxAudioValue = 60000000; // <--- this is the sensitivity
 
@@ -81,15 +106,19 @@ void loop() {
 
     // 4. Update screen only if the image index changes
     if (imgIndex != lastImageIndex) {
-        char filename[16];
-        sprintf(filename, "/%d.bin", imgIndex);
+        char filename[32];
+        sprintf(filename, "/%d.bin", imgIndex); 
         
         File file = LittleFS.open(filename, "r");
         if (file) {
-            file.read((uint8_t*)frameBuffer, sizeof(frameBuffer));
+            // FIX: Use the 'imageSize' constant instead of 'sizeof(frameBuffer)'
+            file.read((uint8_t*)frameBuffer, imageSize);
             file.close();
-            // Since you used '<H' in Python, no extra 'true' flag is needed here
-            gfx->draw16bitRGBBitmap(57, 57, frameBuffer, 125, 125);
+            
+            // FIX: Use 230, 230 and center it on the 240x240 screen (x=5, y=5)
+            gfx->draw16bitRGBBitmap(5, 5, frameBuffer, 230, 230);
+        } else {
+            Serial.print("Failed to open: "); Serial.println(filename);
         }
         lastImageIndex = imgIndex;
     }
